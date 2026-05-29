@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+<title>YOLO + ToF Detector</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.17.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@600;700&display=swap');
+
+  :root {
+    --green:   #00ff88;
+    --cyan:    #00e5ff;
+    --red:     #ff3d5a;
+    --yellow:  #ffe500;
+    --bg:      #050a0e;
+    --panel:   rgba(0,255,136,0.06);
+    --border:  rgba(0,255,136,0.18);
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--green);
+    font-family: 'Share Tech Mono', monospace;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── HUD bar ── */
+  #hud {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    background: rgba(0,0,0,0.7);
+    border-bottom: 1px solid var(--border);
+    z-index: 10;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+
+  .hud-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 70px;
+  }
+  .hud-label { font-size: 9px; color: #555; letter-spacing: 2px; text-transform: uppercase; }
+  .hud-value { font-family: 'Rajdhani', sans-serif; font-size: 20px; font-weight: 700; line-height: 1; }
+  #valFps    { color: var(--green); }
+  #valDist   { color: var(--yellow); }
+  #valObjs   { color: var(--cyan); }
+
+  /* status pill */
+  #statusBar {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    white-space: nowrap;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+    transition: color 0.3s;
+  }
+
+  /* ── Camera area ── */
+  #camWrap {
+    position: relative;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  #video {
+    position: absolute;
+    width: 100%; height: 100%;
+    object-fit: cover;
+  }
+
+  #canvas {
+    position: absolute;
+    width: 100%; height: 100%;
+    top: 0; left: 0;
+  }
+
+  /* ── Corner scan lines ── */
+  .corner {
+    position: absolute;
+    width: 24px; height: 24px;
+    border-color: var(--green);
+    border-style: solid;
+    opacity: 0.6;
+    z-index: 5;
+  }
+  .tl { top: 8px; left: 8px;  border-width: 2px 0 0 2px; }
+  .tr { top: 8px; right: 8px; border-width: 2px 2px 0 0; }
+  .bl { bottom: 8px; left: 8px;  border-width: 0 0 2px 2px; }
+  .br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
+
+  /* scan line animation */
+  #scanLine {
+    position: absolute;
+    left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--green), transparent);
+    opacity: 0.3;
+    animation: scan 3s linear infinite;
+    z-index: 4;
+    pointer-events: none;
+  }
+  @keyframes scan { from { top: 0% } to { top: 100% } }
+
+  /* ── Bottom buttons ── */
+  #controls {
+    display: flex;
+    gap: 10px;
+    padding: 8px 12px;
+    background: rgba(0,0,0,0.7);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+
+  button {
+    flex: 1;
+    padding: 10px 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--green);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: background 0.2s, color 0.2s;
+    text-transform: uppercase;
+  }
+  button:active { background: rgba(0,255,136,0.2); }
+  button.danger  { border-color: rgba(255,61,90,0.4); color: var(--red); }
+  button.active  { background: rgba(0,255,136,0.15); color: #fff; }
+
+  /* Loading overlay */
+  #loader {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    gap: 16px;
+  }
+  #loader h1 { font-family: 'Rajdhani', sans-serif; font-size: 28px; letter-spacing: 4px; color: var(--green); }
+  #loaderMsg { font-size: 12px; color: #555; letter-spacing: 2px; }
+  .spinner {
+    width: 40px; height: 40px;
+    border: 2px solid var(--border);
+    border-top-color: var(--green);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg) } }
+
+  /* toast */
+  #toast {
+    position: fixed;
+    bottom: 80px; left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.85);
+    border: 1px solid var(--border);
+    color: var(--cyan);
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-size: 12px;
+    opacity: 0;
+    transition: opacity 0.3s;
+    z-index: 50;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+
+<!-- Loading screen -->
+<div id="loader">
+  <div class="spinner"></div>
+  <h1>YOLO + TOF</h1>
+  <div id="loaderMsg">Loading AI model...</div>
+</div>
+
+<!-- HUD -->
+<div id="hud">
+  <div class="hud-cell">
+    <span class="hud-label">FPS</span>
+    <span class="hud-value" id="valFps">--</span>
+  </div>
+  <div class="hud-cell">
+    <span class="hud-label">Distance</span>
+    <span class="hud-value" id="valDist">-- mm</span>
+  </div>
+  <div class="hud-cell">
+    <span class="hud-label">Objects</span>
+    <span class="hud-value" id="valObjs">0</span>
+  </div>
+  <div id="statusBar">Initialising...</div>
+</div>
+
+<!-- Camera + overlay -->
+<div id="camWrap">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas"></canvas>
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+  <div id="scanLine"></div>
+</div>
+
+<!-- Controls -->
+<div id="controls">
+  <button id="btnCam"  onclick="startCamera()">📷 Camera</button>
+  <button id="btnUsb"  onclick="connectSerial()">🔌 Connect Arduino</button>
+  <button id="btnFlip" onclick="flipCamera()">🔄 Flip</button>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ─── Labels from labels.txt (COCO-80) ────────────────────────────────────────
+// Embedded directly so the HTML works as a single standalone file.
+// These must match exactly what coco-ssd returns.
+const ALLOWED_LABELS = new Set([
+  "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
+  "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
+  "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack",
+  "umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball",
+  "kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket",
+  "bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
+  "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair",
+  "couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
+  "remote","keyboard","cell phone","microwave","oven","toaster","sink",
+  "refrigerator","book","clock","vase","scissors","teddy bear","hair drier",
+  "toothbrush"
+]);
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let model        = null;
+let videoStream  = null;
+let serialPort   = null;   // Web Serial port object
+let serialReader = null;   // ReadableStreamDefaultReader
+let facingMode   = 'environment';
+let distance     = 0;
+let detecting    = false;
+let lastTime     = performance.now();
+let fpsFilter    = 0;
+let lineBuffer   = '';
+
+const video  = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+
+// ─── Class colours ───────────────────────────────────────────────────────────
+const CLASS_COLORS = {};
+function classColor(label) {
+  if (!CLASS_COLORS[label]) {
+    let h = 0;
+    for (const c of label) h = (h * 31 + c.charCodeAt(0)) % 360;
+    CLASS_COLORS[label] = `hsl(${h},90%,55%)`;
+  }
+  return CLASS_COLORS[label];
+}
+
+// ─── Load model ──────────────────────────────────────────────────────────────
+async function init() {
+  setLoaderMsg('Loading COCO-SSD model…');
+  try {
+    model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    setLoaderMsg('Starting camera…');
+    await startCamera();
+    document.getElementById('loader').style.display = 'none';
+    setStatus('Model ready ✓', 'var(--green)');
+  } catch(e) {
+    setLoaderMsg('Error: ' + e.message);
+  }
+}
+
+// ─── Camera ──────────────────────────────────────────────────────────────────
+async function startCamera() {
+  if (videoStream) videoStream.getTracks().forEach(t => t.stop());
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+    video.srcObject = videoStream;
+    await video.play();
+    document.getElementById('btnCam').classList.add('active');
+    requestAnimationFrame(detectLoop);
+  } catch(e) {
+    toast('Camera error: ' + e.message);
+  }
+}
+
+function flipCamera() {
+  facingMode = facingMode === 'environment' ? 'user' : 'environment';
+  startCamera();
+}
+
+// ─── Detection loop ──────────────────────────────────────────────────────────
+async function detectLoop() {
+  if (!model || video.readyState < 2) { requestAnimationFrame(detectLoop); return; }
+  if (detecting)                       { requestAnimationFrame(detectLoop); return; }
+  detecting = true;
+
+  // Resize canvas to match video display size
+  const vw = video.clientWidth, vh = video.clientHeight;
+  if (canvas.width !== vw || canvas.height !== vh) { canvas.width = vw; canvas.height = vh; }
+
+  // Run inference, then filter to only labels in labels.txt
+  const raw         = await model.detect(video);
+  const predictions = raw.filter(p => ALLOWED_LABELS.has(p.class));
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  for (const p of predictions) {
+    const [x, y, w, h] = p.bbox;
+    const sx = vw / video.videoWidth, sy = vh / video.videoHeight;
+    const bx = x*sx, by = y*sy, bw = w*sx, bh = h*sy;
+    const col  = classColor(p.class);
+    const conf = Math.round(p.score * 100);
+
+    // Bounding box
+    ctx.strokeStyle = col;
+    ctx.lineWidth   = 2.5;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // Corner accents
+    const cs = 12;
+    ctx.lineWidth = 3;
+    [[bx,by],[bx+bw,by],[bx,by+bh],[bx+bw,by+bh]].forEach(([cx,cy], i) => {
+      ctx.beginPath();
+      ctx.moveTo(cx + (i % 2 === 0 ? cs : -cs), cy);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(cx, cy + (i < 2 ? cs : -cs));
+      ctx.strokeStyle = col;
+      ctx.stroke();
+    });
+
+    // Label badge — show class name + confidence
+    const labelText = `${p.class}  ${conf}%`;
+    ctx.font = 'bold 13px "Share Tech Mono", monospace';
+    const tw = ctx.measureText(labelText).width + 12;
+    const badgeY = by > 22 ? by - 22 : by;
+    ctx.fillStyle = col + 'cc';
+    ctx.fillRect(bx, badgeY, tw, 20);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(labelText, bx + 6, badgeY + 14);
+
+    // Distance overlay on the largest (first) detected box
+    if (predictions.indexOf(p) === 0 && distance > 0) {
+      const dl = `${distance} mm`;
+      ctx.font = 'bold 22px "Rajdhani", sans-serif';
+      const dw = ctx.measureText(dl).width;
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(bx + bw/2 - dw/2 - 6, by + bh/2 - 18, dw + 12, 28);
+      ctx.fillStyle = '#ffe500';
+      ctx.fillText(dl, bx + bw/2 - dw/2, by + bh/2 + 6);
+    }
+  }
+
+  // FPS counter
+  const now = performance.now();
+  fpsFilter = fpsFilter * 0.85 + (1000 / (now - lastTime)) * 0.15;
+  lastTime  = now;
+  document.getElementById('valFps').textContent  = Math.round(fpsFilter);
+  document.getElementById('valObjs').textContent = predictions.length;
+
+  detecting = false;
+  requestAnimationFrame(detectLoop);
+}
+
+// ─── Web Serial — Arduino ─────────────────────────────────────────────────────
+// Web Serial is the correct API for reading Arduino Serial.println() output.
+// It works in Chrome 89+ on desktop and Chrome for Android 105+.
+// Your Arduino sketch should do:  Serial.println("DIST:" + String(tof_mm));
+// ─────────────────────────────────────────────────────────────────────────────
+async function connectSerial() {
+  if (!('serial' in navigator)) {
+    toast('Web Serial not supported — use Chrome 89+ on desktop or Android.');
+    return;
+  }
+  const btn = document.getElementById('btnUsb');
+  try {
+    // Prompt the user to pick a port (Arduino will appear here)
+    serialPort = await navigator.serial.requestPort();
+
+    // Open at 9600 baud — match this to your Arduino Serial.begin() value
+    await serialPort.open({ baudRate: 9600 });
+
+    btn.classList.add('active');
+    btn.textContent  = '🔌 Disconnect';
+    btn.onclick      = disconnectSerial;
+    setStatus('Arduino connected ✓', 'var(--green)');
+    toast('Arduino connected — reading DIST:… lines');
+
+    readSerialLoop();
+  } catch(e) {
+    if (e.name !== 'NotFoundError') toast('Serial: ' + e.message);
+  }
+}
+
+async function readSerialLoop() {
+  // TextDecoderStream lets us read text line-by-line without manual buffering
+  const decoder = new TextDecoderStream();
+  serialPort.readable.pipeTo(decoder.writable);
+  serialReader = decoder.readable.getReader();
+
+  try {
+    while (true) {
+      const { value, done } = await serialReader.read();
+      if (done) break;
+      if (!value) continue;
+
+      lineBuffer += value;
+      let nl;
+      while ((nl = lineBuffer.indexOf('\n')) >= 0) {
+        const line   = lineBuffer.slice(0, nl).trim();
+        lineBuffer   = lineBuffer.slice(nl + 1);
+
+        if (line.startsWith('DIST:')) {
+          const d = parseInt(line.slice(5), 10);
+          if (!isNaN(d) && d > 0 && d <= 4000) {
+            distance = d;
+            document.getElementById('valDist').textContent = d + ' mm';
+          } else {
+            distance = 0;
+            document.getElementById('valDist').textContent = '-- mm';
+          }
+        }
+        // You can handle other message types from Arduino here, e.g.:
+        // if (line.startsWith('INFO:')) toast(line.slice(5));
+      }
+    }
+  } catch(e) {
+    // Port closed or lost
+  } finally {
+    serialReader = null;
+    distance = 0;
+    document.getElementById('valDist').textContent = '-- mm';
+    setStatus('Arduino disconnected', 'var(--red)');
+    const btn = document.getElementById('btnUsb');
+    btn.classList.remove('active');
+    btn.textContent = '🔌 Connect Arduino';
+    btn.onclick     = connectSerial;
+  }
+}
+
+async function disconnectSerial() {
+  try { if (serialReader) await serialReader.cancel(); } catch(_) {}
+  try { if (serialPort)   await serialPort.close();   } catch(_) {}
+  serialPort = serialReader = null;
+  // UI cleanup happens in the readSerialLoop finally block
+}
+
+// ─── UI helpers ──────────────────────────────────────────────────────────────
+function setLoaderMsg(msg) { document.getElementById('loaderMsg').textContent = msg; }
+function setStatus(msg, color) {
+  const el = document.getElementById('statusBar');
+  el.textContent = msg;
+  el.style.color = color || 'var(--green)';
+}
+
+let toastTimer;
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.opacity = '1';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.style.opacity = '0', 3500);
+}
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
